@@ -136,27 +136,42 @@ int main() {
 
       const Value &testCase = request["case"].GetObject();
 
-      Schema schema;
-      SchemaParser parser(DIALECTS.at(dialect));
-      RapidJsonAdapter schemaAdapter(testCase["schema"]);
-
-      if (testCase.HasMember("registry")) {
-        auto registry = Registry{&testCase["registry"]};
-        parser.populateSchema(schemaAdapter, schema,
-                              bind(&Registry::fetchDocument, registry, _1),
-                              freeDocument);
+      if (request.HasMember("output") && request["output"].IsString() &&
+          request["output"] == "annotations") {
+        for (auto &each : testCase["tests"].GetArray()) {
+          (void)each;
+          Value result(kObjectType);
+          result.AddMember("skipped", true, allocator);
+          result.AddMember(
+              "message", "valijson does not support annotation collection",
+              allocator);
+          results.PushBack(result, allocator);
+        }
       } else {
-        parser.populateSchema(schemaAdapter, schema);
-      }
+        valijson::Validator validator;
 
-      for (auto &each : testCase["tests"].GetArray()) {
-        RapidJsonAdapter instance(each["instance"]);
+        Schema schema;
+        SchemaParser parser(DIALECTS.at(dialect));
+        RapidJsonAdapter schemaAdapter(testCase["schema"]);
 
-        Value result(kObjectType);
-        result.AddMember("valid", validator.validate(schema, instance, NULL),
-                         allocator);
+        if (testCase.HasMember("registry")) {
+          auto registry = Registry{&testCase["registry"]};
+          parser.populateSchema(schemaAdapter, schema,
+                                bind(&Registry::fetchDocument, registry, _1),
+                                freeDocument);
+        } else {
+          parser.populateSchema(schemaAdapter, schema);
+        }
 
-        results.PushBack(result, allocator);
+        for (auto &each : testCase["tests"].GetArray()) {
+          RapidJsonAdapter instance(each["instance"]);
+
+          Value result(kObjectType);
+          result.AddMember("valid", validator.validate(schema, instance, NULL),
+                           allocator);
+
+          results.PushBack(result, allocator);
+        }
       }
 
       response.AddMember("results", results, allocator);
