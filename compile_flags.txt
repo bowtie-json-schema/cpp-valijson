@@ -1,2 +1,3 @@
 -static
 -std=c++17
+-DVALIJSON_USE_EXCEPTIONS=1

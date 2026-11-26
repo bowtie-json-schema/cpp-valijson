@@ -1,13 +1,16 @@
 #include <cassert>
+#include <exception>
 #include <iostream>
 #include <map>
 #include <string>
 #include <sys/utsname.h>
 
+// The RapidJSON adapter must be included before any RapidJSON headers, so that
+// it can define RAPIDJSON_ASSERT to report assertion failures as exceptions
+#include "valijson/adapters/rapidjson_adapter.hpp"
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
-#include "valijson/adapters/rapidjson_adapter.hpp"
 #include "valijson/schema.hpp"
 #include "valijson/schema_parser.hpp"
 #include "valijson/utils/rapidjson_utils.hpp"
@@ -20,9 +23,14 @@ using valijson::Schema;
 using valijson::SchemaParser;
 using valijson::adapters::RapidJsonAdapter;
 
+#ifndef VALIJSON_VERSION
+#error "VALIJSON_VERSION must be defined as the version of valijson under test"
+#endif
+
 const unordered_map<string, SchemaParser::Version> DIALECTS{
     {"http://json-schema.org/draft-07/schema#", SchemaParser::kDraft7},
     {"http://json-schema.org/draft-04/schema#", SchemaParser::kDraft4},
+    {"http://json-schema.org/draft-03/schema#", SchemaParser::kDraft3},
 };
 
 class Registry {
@@ -32,9 +40,15 @@ public:
   Registry(const Value *registryContents) { contents = registryContents; }
 
   const Document *fetchDocument(const string &uri) {
-    Document *fetchedRoot = new Document();
     auto registry = contents->GetObject();
-    fetchedRoot->CopyFrom(registry[uri.c_str()], fetchedRoot->GetAllocator());
+    auto entry = registry.FindMember(uri.c_str());
+    if (entry == registry.MemberEnd()) {
+      // valijson reports a document that cannot be fetched as an error
+      return nullptr;
+    }
+
+    Document *fetchedRoot = new Document();
+    fetchedRoot->CopyFrom(entry->value, fetchedRoot->GetAllocator());
     return fetchedRoot;
   }
 };
@@ -94,6 +108,7 @@ int main() {
       Value implementation(kObjectType);
       implementation.AddMember("language", "c++", allocator);
       implementation.AddMember("name", "valijson", allocator);
+      implementation.AddMember("version", VALIJSON_VERSION, allocator);
       implementation.AddMember(
           "homepage", "https://github.com/tristanpenman/valijson", allocator);
       implementation.AddMember(
@@ -105,6 +120,7 @@ int main() {
       Value dialects(kArrayType);
       dialects.PushBack("http://json-schema.org/draft-07/schema#", allocator);
       dialects.PushBack("http://json-schema.org/draft-04/schema#", allocator);
+      dialects.PushBack("http://json-schema.org/draft-03/schema#", allocator);
       implementation.AddMember("dialects", dialects, allocator);
 
       Value os(os_info["sysname"].c_str(), allocator);
@@ -130,36 +146,47 @@ int main() {
       }
 
       response.AddMember("seq", request["seq"], allocator);
-      Value results(kArrayType);
 
-      valijson::Validator validator;
+      // Report errors, such as a schema that valijson cannot parse, for the
+      // test case, rather than terminating the harness and losing the results
+      // of the test cases that follow it
+      try {
+        Value results(kArrayType);
 
-      const Value &testCase = request["case"].GetObject();
+        valijson::Validator validator;
 
-      Schema schema;
-      SchemaParser parser(DIALECTS.at(dialect));
-      RapidJsonAdapter schemaAdapter(testCase["schema"]);
+        const Value &testCase = request["case"].GetObject();
 
-      if (testCase.HasMember("registry")) {
-        auto registry = Registry{&testCase["registry"]};
-        parser.populateSchema(schemaAdapter, schema,
-                              bind(&Registry::fetchDocument, registry, _1),
-                              freeDocument);
-      } else {
-        parser.populateSchema(schemaAdapter, schema);
+        Schema schema;
+        SchemaParser parser(DIALECTS.at(dialect));
+        RapidJsonAdapter schemaAdapter(testCase["schema"]);
+
+        if (testCase.HasMember("registry")) {
+          auto registry = Registry{&testCase["registry"]};
+          parser.populateSchema(schemaAdapter, schema,
+                                bind(&Registry::fetchDocument, registry, _1),
+                                freeDocument);
+        } else {
+          parser.populateSchema(schemaAdapter, schema);
+        }
+
+        for (auto &each : testCase["tests"].GetArray()) {
+          RapidJsonAdapter instance(each["instance"]);
+
+          Value result(kObjectType);
+          result.AddMember("valid", validator.validate(schema, instance, NULL),
+                           allocator);
+
+          results.PushBack(result, allocator);
+        }
+
+        response.AddMember("results", results, allocator);
+      } catch (const exception &e) {
+        Value context(kObjectType);
+        context.AddMember("message", Value(e.what(), allocator), allocator);
+        response.AddMember("errored", true, allocator);
+        response.AddMember("context", context, allocator);
       }
-
-      for (auto &each : testCase["tests"].GetArray()) {
-        RapidJsonAdapter instance(each["instance"]);
-
-        Value result(kObjectType);
-        result.AddMember("valid", validator.validate(schema, instance, NULL),
-                         allocator);
-
-        results.PushBack(result, allocator);
-      }
-
-      response.AddMember("results", results, allocator);
     } else if (cmd == "stop") {
       if (!started) {
         throw runtime_error("Bowtie hasn't started!");
